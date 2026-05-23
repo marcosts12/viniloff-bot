@@ -28,11 +28,13 @@ from datetime import datetime
 # ─────────────────────────────────────────────
 
 TELEGRAM_TOKEN    = "8944782842:AAHMfyHMKSijzbby1lc-hNplMMGPu7BnP4s"
-TELEGRAM_CHAT_ID  = 7484525336
+TELEGRAM_CHAT_ID  = 7484525336   # seu ID pessoal (alertas privados)
+CANAL_USERNAME    = "@viniloff_br"         # canal público
+AFILIADO_ID       = "viniloff-20"          # seu ID de associado Amazon
 
 DESCONTO_MINIMO   = 10    # % mínimo de queda para alertar
-INTERVALO_MINUTOS = 30    # minutos entre varreduras
-PAGINAS_VARRER    = 3     # páginas por categoria
+INTERVALO_MINUTOS = 20    # minutos entre varreduras
+PAGINAS_VARRER    = 5     # páginas por categoria
 ARQUIVO_HISTORICO = "historico_viniloff.json"
 
 # ─────────────────────────────────────────────
@@ -117,11 +119,12 @@ def pausa_humana(minimo=3, maximo=9):
     time.sleep(pausa)
 
 
-def enviar_telegram(msg):
+def enviar_telegram(msg, chat_id=None):
+    """Envia mensagem para o chat_id especificado (padrão: seu privado)"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         r = requests.post(url, json={
-            "chat_id": TELEGRAM_CHAT_ID,
+            "chat_id": chat_id or TELEGRAM_CHAT_ID,
             "text": msg,
             "parse_mode": "HTML",
             "disable_web_page_preview": False,
@@ -129,6 +132,80 @@ def enviar_telegram(msg):
         return r.status_code == 200
     except Exception as e:
         log(f"Telegram erro: {e}")
+        return False
+
+
+def link_afiliado(asin):
+    """Gera link de afiliado Amazon automaticamente com ID viniloff-20"""
+    return f"https://www.amazon.com.br/dp/{asin}?tag={AFILIADO_ID}"
+
+
+def postar_no_canal(alerta):
+    """Posta a promoção no canal público @viniloff_br com foto do produto"""
+    try:
+        desconto = alerta.get("desconto_pct", 0)
+        preco_atual = alerta["preco_atual"]
+        preco_maximo = alerta.get("preco_maximo", preco_atual)
+        nome = alerta["nome"]
+        asin = alerta.get("asin", "")
+        img_url = alerta.get("img_url")
+        url_produto = link_afiliado(asin) if asin else alerta["url"]
+
+        # Escolhe emoji baseado no desconto
+        if desconto >= 30:
+            fogo = "🔥🔥🔥"
+        elif desconto >= 20:
+            fogo = "🔥🔥"
+        else:
+            fogo = "🔥"
+
+        economia = preco_maximo - preco_atual
+
+        caption = (
+            f"{fogo} <b>VINIL EM PROMOÇÃO!</b>\n\n"
+            f"🎵 <b>{nome}</b>\n\n"
+            f"<s>R$ {preco_maximo:.2f}</s>  →  "
+            f"<b>R$ {preco_atual:.2f}</b>\n"
+            f"💸 Economia de <b>R$ {economia:.2f} ({desconto}% OFF)</b>\n\n"
+            f"🛒 <a href=\"{url_produto}\">Comprar →</a>"
+        )
+
+        # Tenta postar com foto
+        if img_url:
+            try:
+                url_api = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+                r = requests.post(url_api, json={
+                    "chat_id": CANAL_USERNAME,
+                    "photo": img_url,
+                    "caption": caption,
+                    "parse_mode": "HTML",
+                }, timeout=15)
+                if r.status_code == 200:
+                    log(f"  ✅ Postado com foto no canal {CANAL_USERNAME}!")
+                    return True
+                else:
+                    log(f"  ⚠️ Foto falhou ({r.status_code}), tentando sem foto...")
+            except Exception as e:
+                log(f"  ⚠️ Erro na foto: {e}, tentando sem foto...")
+
+        # Fallback — posta sem foto
+        url_api = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        r = requests.post(url_api, json={
+            "chat_id": CANAL_USERNAME,
+            "text": caption,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": False,
+        }, timeout=10)
+
+        if r.status_code == 200:
+            log(f"  ✅ Postado no canal {CANAL_USERNAME}!")
+            return True
+        else:
+            log(f"  ❌ Erro ao postar no canal: {r.text}")
+            return False
+
+    except Exception as e:
+        log(f"  Erro ao postar no canal: {e}")
         return False
 
 
@@ -191,12 +268,23 @@ def extrair_produtos_da_pagina(html):
             badge_el = card.select_one(".a-badge-text")
             badge = badge_el.get_text().strip() if badge_el else None
 
+            # Tenta extrair URL da imagem do produto
+            img_url = None
+            img_el = card.select_one("img.s-image, img[data-image-latency='s-product-image']")
+            if img_el:
+                img_url = img_el.get("src") or img_el.get("data-src")
+                # Pega versão maior da imagem substituindo o tamanho no URL
+                if img_url:
+                    import re
+                    img_url = re.sub(r'\._[A-Z0-9_,]+_\.', '._AC_SL500_.', img_url)
+
             produtos.append({
                 "asin": asin,
                 "nome": nome[:80],
                 "preco": preco,
                 "preco_original": preco_original,
                 "badge": badge,
+                "img_url": img_url,
                 "url": f"https://www.amazon.com.br/dp/{asin}",
             })
 
@@ -218,7 +306,7 @@ def varrer_categoria(categoria):
 
         while tentativas < 3:
             try:
-                pausa_humana(8, 18)
+                pausa_humana(4, 10)
                 r = requests.get(url, headers=headers_aleatorios(), timeout=20)
 
                 # Bloqueio detectado
@@ -331,28 +419,38 @@ def analisar_e_alertar(produtos, historico):
 
 def enviar_alertas(alertas_promocao, alertas_queda):
     for a in alertas_promocao[:10]:
-        msg = (
+        # Gera link de afiliado automaticamente
+        asin = a.get("asin", "")
+        url_afiliado = link_afiliado(asin) if asin else a["url"]
+
+        # 1 — Alerta privado para você (com detalhes técnicos)
+        msg_privado = (
             f"🔥 <b>PROMOÇÃO DETECTADA!</b>\n\n"
             f"🎵 <b>{a['nome']}</b>\n\n"
             f"📈 Máximo histórico: <s>R$ {a['preco_maximo']:.2f}</s>\n"
             f"💸 Antes: R$ {a['preco_anterior']:.2f}\n"
             f"✅ Agora: <b>R$ {a['preco_atual']:.2f}</b>\n"
-            f"📉 <b>{a['desconto_pct']}% abaixo do máximo!</b>\n"
-            f"{f'🏷️ {a[chr(98)+chr(97)+chr(100)+chr(103)+chr(101)]}' if a.get('badge') else ''}\n\n"
-            f"🛒 <a href=\"{a['url']}\">Ver na Amazon →</a>\n\n"
+            f"📉 <b>{a['desconto_pct']}% abaixo do máximo!</b>\n\n"
+            f"🛒 <a href=\"{url_afiliado}\">Ver na Amazon (link afiliado) →</a>\n\n"
+            f"📢 Postando no canal {CANAL_USERNAME}...\n"
             f"<i>VinilOFF · {datetime.now().strftime('%d/%m %H:%M')}</i>"
         )
-        enviar_telegram(msg)
-        time.sleep(1)
+        enviar_telegram(msg_privado)
+
+        # 2 — Post público no canal @viniloff_br
+        time.sleep(2)
+        postar_no_canal(a)
+        time.sleep(3)
 
     if alertas_queda:
         linhas = "\n".join([
             f"📀 {q['nome'][:40]}\n   R$ {q['preco_anterior']:.2f} → R$ {q['preco_atual']:.2f} (↓{q['queda_atual']}%)"
             for q in alertas_queda[:8]
         ])
+        # Quedas só vão para o privado, não para o canal público
         enviar_telegram(
-            f"📉 <b>Quedas detectadas:</b>\n\n{linhas}\n\n"
-            f"<i>Abaixo do critério de {DESCONTO_MINIMO}%, mas vale conferir!</i>"
+            f"📉 <b>Quedas detectadas (abaixo do critério):</b>\n\n{linhas}\n\n"
+            f"<i>Monitore — pode virar promoção em breve!</i>"
         )
 
 
@@ -676,3 +774,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
