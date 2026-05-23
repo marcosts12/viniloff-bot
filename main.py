@@ -358,7 +358,7 @@ def enviar_alertas(alertas_promocao, alertas_queda):
 def varredura_completa():
     log("━" * 50)
     log("🔍 Iniciando varredura...")
-  os.system("python exportar_planilha.py")
+    os.system("python exportar_planilha.py")
 
     historico = carregar_historico()
     todos_produtos = []
