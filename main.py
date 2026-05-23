@@ -24,7 +24,7 @@ from urllib.parse import urljoin
 # ─────────────────────────────────────────────
 
 TELEGRAM_TOKEN    = "8944782842:AAHMfyHMKSijzbby1lc-hNplMMGPu7BnP4s"
-TELEGRAM_CHAT_ID  = "7484525336"
+TELEGRAM_CHAT_ID  = 7484525336
 
 # Desconto mínimo para alertar (em %)
 DESCONTO_MINIMO   = 15
