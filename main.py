@@ -31,8 +31,8 @@ TELEGRAM_TOKEN    = "8944782842:AAHMfyHMKSijzbby1lc-hNplMMGPu7BnP4s"
 TELEGRAM_CHAT_ID  = 7484525336
 
 DESCONTO_MINIMO   = 10    # % mínimo de queda para alertar
-INTERVALO_MINUTOS = 20    # minutos entre varreduras
-PAGINAS_VARRER    = 5     # páginas por categoria
+INTERVALO_MINUTOS = 30    # minutos entre varreduras
+PAGINAS_VARRER    = 3     # páginas por categoria
 ARQUIVO_HISTORICO = "historico_viniloff.json"
 
 # ─────────────────────────────────────────────
@@ -218,7 +218,7 @@ def varrer_categoria(categoria):
 
         while tentativas < 3:
             try:
-                pausa_humana(4, 10)
+                pausa_humana(8, 18)
                 r = requests.get(url, headers=headers_aleatorios(), timeout=20)
 
                 # Bloqueio detectado
