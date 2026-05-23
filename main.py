@@ -31,7 +31,7 @@ TELEGRAM_CHAT_ID  = 7484525336
 
 DESCONTO_MINIMO   = 10    # % mínimo de queda para alertar
 INTERVALO_MINUTOS = 20    # minutos entre varreduras
-PAGINAS_VARRER    = 5     # páginas por categoria
+PAGINAS_VARRER    = 3     # páginas por categoria
 ARQUIVO_HISTORICO = "historico_viniloff.json"
 
 # ─────────────────────────────────────────────
@@ -107,7 +107,7 @@ def headers_aleatorios():
     }
 
 
-def pausa_humana(minimo=3, maximo=9):
+def pausa_humana(minimo=8, maximo=18):
     """Pausa aleatória que imita comportamento humano"""
     pausa = random.uniform(minimo, maximo)
     # Às vezes faz uma pausa mais longa como se estivesse lendo
