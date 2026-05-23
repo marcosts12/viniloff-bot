@@ -1,52 +1,62 @@
 """
-VinilOFF — Keepa Bridge Bot
-============================
-Intercepta alertas do Keepa no Telegram e reposta
-automaticamente no canal @viniloff_br com link de afiliado.
+VinilOFF — Canal Spy
+=====================
+Monitora o canal @feirinhavinil (e outros canais de vinil),
+intercepta os links da Amazon, substitui pela tag viniloff-20
+e reposta no @viniloff_br com layout próprio.
 
 COMO CONFIGURAR:
-1. pip install requests
-2. Configure as variáveis abaixo
-3. No Keepa: Settings → Notifications → Telegram
-   - Conecte ao seu bot @viniloff_bot
-4. python viniloff_keepa_bridge.py
+1. pip install telethon requests
+2. Obtenha API ID e HASH em: https://my.telegram.org
+   - Faça login → API development tools → Create application
+3. Preencha as configurações abaixo
+4. python viniloff_spy.py
+   - Na primeira vez vai pedir seu número e código de verificação
+   - Isso é normal — autentica como usuário, não como bot
 
-COMO FUNCIONA:
-- Keepa detecta queda de preço
-- Keepa manda mensagem no seu Telegram
-- Este script intercepta essa mensagem
-- Extrai o ASIN e preço automaticamente
-- Gera link com tag=viniloff-20
-- Posta no canal @viniloff_br com formato bonito
+IMPORTANTE:
+- Use com responsabilidade
+- Apenas canais públicos
+- Sempre adicione sua marca ao repostar
 """
 
 import subprocess, sys
 subprocess.check_call(
-    [sys.executable, "-m", "pip", "install", "requests"],
+    [sys.executable, "-m", "pip", "install", "telethon", "requests"],
     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
 )
 
-import requests
 import re
-import time
-import json
-import os
+import asyncio
+import requests
 from datetime import datetime
+from telethon import TelegramClient, events
+from telethon.tl.types import MessageEntityUrl, MessageEntityTextUrl
 
 # ─────────────────────────────────────────────
 #  CONFIGURAÇÕES
 # ─────────────────────────────────────────────
 
-TELEGRAM_TOKEN   = "8944782842:AAHMfyHMKSijzbby1lc-hNplMMGPu7BnP4s"       # token do @viniloff_bot
-TELEGRAM_CHAT_ID = 7484525336     # seu ID pessoal
-CANAL_USERNAME   = "@viniloff_br"          # canal público
-AFILIADO_ID      = "viniloff-20"           # seu ID de afiliado
+# Obtenha em: https://my.telegram.org → API development tools
+TELEGRAM_API_ID   = 39188583          # número inteiro
+TELEGRAM_API_HASH = "97c631ef6f467be13e810dd1fdf04b05"
 
-# ID do bot do Keepa no Telegram — é sempre esse
-KEEPA_BOT_ID     = "476000"
+# Bot do VinilOFF
+TELEGRAM_BOT_TOKEN = "8944782842:AAHMfyHMKSijzbby1lc-hNplMMGPu7BnP4s"
+TELEGRAM_CHAT_ID   = 7484525336
+CANAL_DESTINO      = "@viniloff_br"
+AFILIADO_ID        = "viniloff-20"
 
-# Arquivo para evitar repostar o mesmo alerta duas vezes
-ARQUIVO_PROCESSADOS = "alertas_processados.json"
+# Canais para monitorar (só canais públicos)
+CANAIS_MONITORAR = [
+    "@feirinhavinil",
+    "@vinilbarato",
+    # Adicione mais canais aqui
+]
+
+# Palavras-chave para filtrar (só reposta se contiver alguma)
+# Deixe vazio [] para repostar tudo
+KEYWORDS = ["vinil", "vinyl", "lp ", "disco", "amazon"]
 
 # ─────────────────────────────────────────────
 #  FUNÇÕES
@@ -60,24 +70,73 @@ def link_afiliado(asin):
     return f"https://www.amazon.com.br/dp/{asin}?tag={AFILIADO_ID}"
 
 
-def carregar_processados():
-    if os.path.exists(ARQUIVO_PROCESSADOS):
-        with open(ARQUIVO_PROCESSADOS, "r") as f:
-            return set(json.load(f))
-    return set()
+def extrair_asin(url):
+    """Extrai ASIN de URL da Amazon"""
+    padroes = [
+        r'/dp/([A-Z0-9]{10})',
+        r'/gp/product/([A-Z0-9]{10})',
+        r'asin=([A-Z0-9]{10})',
+        r'amazon\.com\.br/([A-Z0-9]{10})',
+    ]
+    for padrao in padroes:
+        m = re.search(padrao, url, re.IGNORECASE)
+        if m:
+            return m.group(1).upper()
+    return None
 
 
-def salvar_processados(ids):
-    with open(ARQUIVO_PROCESSADOS, "w") as f:
-        json.dump(list(ids)[-500:], f)  # mantém só os últimos 500
+def extrair_preco(texto):
+    """Extrai preços do texto"""
+    precos = []
+    for m in re.finditer(r'R\$\s*(\d{1,4})[,.](\d{2})', texto):
+        precos.append(float(f"{m.group(1)}.{m.group(2)}"))
+    return precos
 
 
-def enviar_telegram(msg, chat_id=None):
+def extrair_urls(texto):
+    """Extrai todas as URLs do texto"""
+    return re.findall(r'https?://[^\s\)\]\>\"]+', texto)
+
+
+def substituir_links_afiliado(texto):
+    """
+    Substitui todos os links da Amazon no texto pela versão com tag viniloff-20.
+    Retorna (novo_texto, lista_de_asins_encontrados)
+    """
+    asins_encontrados = []
+    novo_texto = texto
+
+    urls = extrair_urls(texto)
+    for url in urls:
+        if 'amazon.com.br' in url or 'amzn' in url.lower():
+            asin = extrair_asin(url)
+            if asin:
+                novo_link = link_afiliado(asin)
+                novo_texto = novo_texto.replace(url, novo_link)
+                asins_encontrados.append(asin)
+                log(f"  Link substituído: {asin} → tag={AFILIADO_ID}")
+            else:
+                # Não achou ASIN mas é link da Amazon — adiciona tag
+                if '?' in url:
+                    novo_link = f"{url}&tag={AFILIADO_ID}"
+                else:
+                    novo_link = f"{url}?tag={AFILIADO_ID}"
+                novo_texto = novo_texto.replace(url, novo_link)
+                log(f"  Tag adicionada ao link: {url[:50]}...")
+
+    return novo_texto, asins_encontrados
+
+
+def enviar_telegram(msg, chat_id=None, parse_mode="HTML"):
     try:
         r = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": chat_id or TELEGRAM_CHAT_ID, "text": msg,
-                  "parse_mode": "HTML", "disable_web_page_preview": False},
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": chat_id or TELEGRAM_CHAT_ID,
+                "text": msg,
+                "parse_mode": parse_mode,
+                "disable_web_page_preview": False,
+            },
             timeout=10
         )
         return r.status_code == 200
@@ -86,290 +145,123 @@ def enviar_telegram(msg, chat_id=None):
         return False
 
 
-def postar_no_canal(nome, asin, preco_atual, preco_anterior=None, desconto=None, img_url=None):
-    """Posta promoção formatada no canal @viniloff_br"""
-    url_prod = link_afiliado(asin)
+def postar_no_canal(texto_original, asins, canal_origem):
+    """Formata e posta no @viniloff_br"""
 
-    if preco_anterior and preco_anterior > preco_atual:
-        economia = preco_anterior - preco_atual
-        pct      = round(((preco_anterior - preco_atual) / preco_anterior) * 100)
-        fogo     = "🔥🔥🔥" if pct >= 30 else "🔥🔥" if pct >= 20 else "🔥"
-        preco_linha = (
-            f"<s>R$ {preco_anterior:.2f}</s>  →  <b>R$ {preco_atual:.2f}</b>\n"
-            f"💸 Economia de <b>R$ {economia:.2f} ({pct}% OFF)</b>"
-        )
-    else:
-        fogo = "🔥"
-        preco_linha = f"<b>R$ {preco_atual:.2f}</b>"
+    # Substitui links por versão afiliada
+    novo_texto, _ = substituir_links_afiliado(texto_original)
 
-    caption = (
-        f"{fogo} <b>VINIL EM PROMOÇÃO!</b>\n\n"
-        f"🎵 <b>{nome}</b>\n\n"
-        f"{preco_linha}\n\n"
-        f"🛒 <a href=\"{url_prod}\">Comprar →</a>"
-    )
+    # Remove menções ao canal de origem
+    for canal in CANAIS_MONITORAR:
+        novo_texto = novo_texto.replace(canal, "")
+        novo_texto = novo_texto.replace(canal.replace("@", ""), "")
 
-    # Tenta com foto
-    if img_url:
-        try:
-            r = requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
-                json={"chat_id": CANAL_USERNAME, "photo": img_url,
-                      "caption": caption, "parse_mode": "HTML"},
-                timeout=15
-            )
-            if r.status_code == 200:
-                log(f"  ✅ Postado com foto no {CANAL_USERNAME}!")
-                return True
-        except Exception:
-            pass
+    # Remove "Forwarded from" se houver
+    novo_texto = re.sub(r'Forwarded from.*?\n', '', novo_texto)
 
-    # Fallback sem foto
-    r = requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        json={"chat_id": CANAL_USERNAME, "text": caption,
-              "parse_mode": "HTML", "disable_web_page_preview": False},
-        timeout=10
-    )
-    if r.status_code == 200:
-        log(f"  ✅ Postado no canal {CANAL_USERNAME}!")
-        return True
-    log(f"  ❌ Erro: {r.text}")
-    return False
-
-
-def extrair_asin_da_url(texto):
-    """Extrai ASIN de qualquer URL da Amazon"""
-    padroes = [
-        r'/dp/([A-Z0-9]{10})',
-        r'/gp/product/([A-Z0-9]{10})',
-        r'asin=([A-Z0-9]{10})',
-        r'/([A-Z0-9]{10})(?:\?|/|$)',
-    ]
-    for padrao in padroes:
-        match = re.search(padrao, texto)
-        if match:
-            return match.group(1)
-    return None
-
-
-def extrair_preco(texto):
-    """Extrai valor em R$ de um texto"""
-    # Padrões: R$ 199,90 / R$199.90 / 199,90
-    padroes = [
-        r'R\$\s*(\d+)[,.](\d{2})',
-        r'(\d+)[,.](\d{2})\s*(?:BRL|reais)',
-        r'(\d{1,4})[,.](\d{2})',
-    ]
-    for padrao in padroes:
-        match = re.search(padrao, texto)
-        if match:
-            inteiro = match.group(1).replace('.', '').replace(',', '')
-            decimal = match.group(2)
-            return float(f"{inteiro}.{decimal}")
-    return None
-
-
-def processar_mensagem_keepa(texto, update_id):
-    """
-    Processa mensagem do Keepa e extrai dados do produto.
-    
-    Exemplos de mensagem do Keepa:
-    - "Price drop! Product Name - Now: R$ 189,90 (was R$ 320,00) amazon.com.br/dp/ASIN"
-    - "⚡ Price Alert: Product Name R$ 199,90 https://amazon.com.br/dp/ASIN"
-    """
-    log(f"Mensagem do Keepa: {texto[:100]}...")
-
-    # Extrai ASIN
-    asin = extrair_asin_da_url(texto)
-    if not asin:
-        log("  ASIN não encontrado na mensagem")
-        return False
-
-    log(f"  ASIN: {asin}")
-
-    # Extrai preços — pega todos os valores monetários encontrados
-    precos = []
-    for match in re.finditer(r'R\$\s*(\d+)[,.](\d{2})', texto):
-        val = float(f"{match.group(1)}.{match.group(2)}")
-        precos.append(val)
-
-    if not precos:
-        # Tenta formato sem R$
-        for match in re.finditer(r'\b(\d{2,4})[,.](\d{2})\b', texto):
-            val = float(f"{match.group(1)}.{match.group(2)}")
-            if 20 < val < 5000:
-                precos.append(val)
-
-    if not precos:
-        log("  Preço não encontrado na mensagem")
-        return False
-
-    preco_atual    = min(precos)   # menor preço = preço atual (em promoção)
-    preco_anterior = max(precos) if len(precos) > 1 else None
-
-    log(f"  Preço atual: R$ {preco_atual:.2f}")
-    if preco_anterior:
-        log(f"  Preço anterior: R$ {preco_anterior:.2f}")
-
-    # Extrai nome do produto — pega a primeira linha não vazia antes do preço
-    linhas = [l.strip() for l in texto.split('\n') if l.strip()]
-    nome = "Disco de Vinil"
-    for linha in linhas:
-        # Ignora linhas que são só emojis, URLs ou preços
-        if (len(linha) > 10
-                and 'amazon' not in linha.lower()
-                and 'keepa' not in linha.lower()
-                and not linha.startswith('http')
-                and not re.match(r'^[R\$\d\s,\.]+$', linha)):
-            nome = linha[:80]
-            break
-
-    log(f"  Nome: {nome}")
+    # Limpa espaços extras
+    novo_texto = re.sub(r'\n{3,}', '\n\n', novo_texto).strip()
 
     # Posta no canal
-    postar_no_canal(
-        nome=nome,
-        asin=asin,
-        preco_atual=preco_atual,
-        preco_anterior=preco_anterior,
-    )
+    url_api = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    r = requests.post(url_api, json={
+        "chat_id": CANAL_DESTINO,
+        "text": novo_texto,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": False,
+    }, timeout=10)
 
-    # Confirma no privado
+    if r.status_code == 200:
+        log(f"  ✅ Postado no {CANAL_DESTINO}!")
+
+        # Avisa no privado
+        enviar_telegram(
+            f"🔁 <b>Repost do {canal_origem}</b>\n\n"
+            f"ASINs: {', '.join(asins) if asins else 'nenhum'}\n"
+            f"Links substituídos com <code>tag={AFILIADO_ID}</code>\n\n"
+            f"<i>{datetime.now().strftime('%d/%m %H:%M')}</i>"
+        )
+        return True
+    else:
+        log(f"  ❌ Erro ao postar: {r.status_code} {r.text[:100]}")
+        return False
+
+
+def contem_keyword(texto):
+    """Verifica se o texto contém alguma palavra-chave de vinil"""
+    if not KEYWORDS:
+        return True
+    texto_lower = texto.lower()
+    return any(kw.lower() in texto_lower for kw in KEYWORDS)
+
+
+def contem_link_amazon(texto):
+    """Verifica se o texto contém link da Amazon"""
+    return 'amazon.com.br' in texto or 'amzn.to' in texto or 'amzn.com' in texto
+
+
+# ─────────────────────────────────────────────
+#  CLIENTE TELETHON
+# ─────────────────────────────────────────────
+
+async def main():
+    # Cria cliente Telethon (autentica como usuário)
+    client = TelegramClient("viniloff_spy", TELEGRAM_API_ID, TELEGRAM_API_HASH)
+
+    await client.start()
+    log("✅ Conectado ao Telegram como usuário!")
+    log(f"Monitorando: {', '.join(CANAIS_MONITORAR)}")
+    log(f"Destino: {CANAL_DESTINO}")
+
     enviar_telegram(
-        f"✅ <b>Alerta do Keepa processado!</b>\n\n"
-        f"🎵 {nome}\n"
-        f"📦 ASIN: <code>{asin}</code>\n"
-        f"💰 R$ {preco_atual:.2f}\n\n"
-        f"Postado no {CANAL_USERNAME} com link afiliado!"
+        f"👀 <b>VinilOFF Spy ativo!</b>\n\n"
+        f"Monitorando:\n" +
+        "\n".join([f"• {c}" for c in CANAIS_MONITORAR]) +
+        f"\n\nDestino: {CANAL_DESTINO}\n"
+        f"Tag: {AFILIADO_ID}\n\n"
+        f"<i>Toda promoção de vinil será repostada com seu link!</i>"
     )
-    return True
 
-
-def escutar_mensagens():
-    """Fica escutando mensagens no Telegram e processa alertas do Keepa"""
-    ultimo_update = 0
-    processados   = carregar_processados()
-
-    log("👂 Escutando alertas do Keepa...")
-    log(f"Canal: {CANAL_USERNAME} | Afiliado: {AFILIADO_ID}")
-
-    while True:
+    @client.on(events.NewMessage(chats=CANAIS_MONITORAR))
+    async def handler(event):
         try:
-            r = requests.get(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
-                params={"offset": ultimo_update + 1, "timeout": 30},
-                timeout=35
-            )
+            msg = event.message
+            texto = msg.text or msg.message or ""
 
-            if r.status_code != 200:
-                time.sleep(10)
-                continue
+            if not texto:
+                return
 
-            updates = r.json().get("result", [])
+            canal_origem = event.chat.username or str(event.chat_id)
+            log(f"Nova mensagem em @{canal_origem}: {texto[:80]}...")
 
-            for update in updates:
-                ultimo_update = update["update_id"]
-                uid = str(update["update_id"])
+            # Filtra por keyword e link Amazon
+            if not contem_keyword(texto):
+                log("  Ignorado — sem keyword de vinil")
+                return
 
-                if uid in processados:
-                    continue
+            if not contem_link_amazon(texto):
+                log("  Ignorado — sem link Amazon")
+                return
 
-                msg      = update.get("message", {})
-                texto    = msg.get("text", "").strip()
-                from_id  = msg.get("from", {}).get("id")
-                chat_id  = str(msg.get("chat", {}).get("id", ""))
+            log("  ✅ Mensagem relevante! Processando...")
 
-                # Só processa mensagens para você
-                if chat_id != str(TELEGRAM_CHAT_ID):
-                    continue
+            # Extrai ASINs
+            urls = extrair_urls(texto)
+            asins = []
+            for url in urls:
+                asin = extrair_asin(url)
+                if asin:
+                    asins.append(asin)
 
-                # Comandos do bot
-                if texto.lower() == "/status":
-                    enviar_telegram(
-                        f"📊 <b>VinilOFF Keepa Bridge</b>\n\n"
-                        f"✅ Online e escutando\n"
-                        f"📨 Alertas processados: {len(processados)}\n"
-                        f"📢 Canal: {CANAL_USERNAME}\n"
-                        f"🔗 Afiliado: {AFILIADO_ID}\n\n"
-                        f"<i>{datetime.now().strftime('%d/%m/%Y %H:%M')}</i>"
-                    )
-                    processados.add(uid)
-                    continue
-
-                elif texto.lower() == "/ajuda":
-                    enviar_telegram(
-                        f"🤖 <b>VinilOFF Keepa Bridge</b>\n\n"
-                        f"Este bot intercepta alertas do Keepa e posta automaticamente no {CANAL_USERNAME}.\n\n"
-                        f"<b>Como funciona:</b>\n"
-                        f"1. Configure alertas no keepa.com\n"
-                        f"2. Conecte o Keepa a este bot\n"
-                        f"3. Quando um vinil cair de preço, o Keepa avisa aqui\n"
-                        f"4. O bot reposta no canal com link de afiliado\n\n"
-                        f"/status — ver status\n"
-                        f"/testar ASIN PRECO — testar um post manual\n"
-                        f"Ex: /testar B07Z74G6MR 189.90"
-                    )
-                    processados.add(uid)
-                    continue
-
-                elif texto.lower().startswith("/testar"):
-                    # Permite testar manualmente: /testar B07Z74G6MR 189.90
-                    partes = texto.split()
-                    if len(partes) >= 3:
-                        asin_teste  = partes[1].upper()
-                        preco_teste = float(partes[2].replace(",", "."))
-                        log(f"Teste manual: ASIN={asin_teste} Preço=R${preco_teste}")
-                        postar_no_canal(
-                            nome="Disco de Vinil — Teste",
-                            asin=asin_teste,
-                            preco_atual=preco_teste,
-                            preco_anterior=preco_teste * 1.3,
-                        )
-                    else:
-                        enviar_telegram("Uso: /testar ASIN PRECO\nEx: /testar B07Z74G6MR 189.90")
-                    processados.add(uid)
-                    continue
-
-                # Verifica se é alerta do Keepa
-                # O Keepa manda de um bot específico OU contém padrões reconhecíveis
-                eh_keepa = (
-                    str(from_id) == KEEPA_BOT_ID
-                    or "keepa" in texto.lower()
-                    or ("amazon" in texto.lower() and ("price" in texto.lower() or "drop" in texto.lower() or "alert" in texto.lower()))
-                    or ("amazon.com.br" in texto.lower() and any(c.isdigit() for c in texto))
-                )
-
-                if eh_keepa and texto:
-                    log(f"Alerta do Keepa detectado! Update #{uid}")
-                    processar_mensagem_keepa(texto, uid)
-                    processados.add(uid)
-                    salvar_processados(processados)
+            # Posta no canal
+            postar_no_canal(texto, asins, f"@{canal_origem}")
 
         except Exception as e:
-            log(f"Erro: {e}")
-            time.sleep(15)
+            log(f"Erro ao processar mensagem: {e}")
 
-
-def main():
-    log("🎵 VinilOFF Keepa Bridge iniciado!")
-    log(f"Canal: {CANAL_USERNAME} | Tag: {AFILIADO_ID}")
-
-    enviar_telegram(
-        f"🎵 <b>VinilOFF Keepa Bridge ativo!</b>\n\n"
-        f"Agora configure o Keepa para enviar alertas aqui.\n\n"
-        f"<b>Como configurar o Keepa:</b>\n"
-        f"1. Acesse keepa.com → Settings\n"
-        f"2. Vá em Notifications → Telegram\n"
-        f"3. Conecte ao @viniloff_bot\n"
-        f"4. Quando um vinil cair de preço, posto no {CANAL_USERNAME} automaticamente!\n\n"
-        f"Teste com: /testar B07Z74G6MR 189.90\n"
-        f"/ajuda para ver todos os comandos"
-    )
-
-    escutar_mensagens()
+    log("👂 Escutando novas mensagens...")
+    await client.run_until_disconnected()
 
 
 if __name__ == "__main__":
-    main()
-
+    asyncio.run(main())
