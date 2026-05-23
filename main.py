@@ -11,7 +11,7 @@ COMO USAR:
 
 import subprocess
 import sys
-subprocess.check_call([sys.executable, "-m", "pip", "install", "requests", "beautifulsoup4"], 
+subprocess.check_call([sys.executable, "-m", "pip", "install", "requests", "beautifulsoup4", "openpyxl"],
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 import requests
@@ -20,6 +20,7 @@ import json
 import time
 import os
 import random
+import threading
 from datetime import datetime
 
 # ─────────────────────────────────────────────
@@ -30,8 +31,8 @@ TELEGRAM_TOKEN    = "8944782842:AAHMfyHMKSijzbby1lc-hNplMMGPu7BnP4s"
 TELEGRAM_CHAT_ID  = 7484525336
 
 DESCONTO_MINIMO   = 10    # % mínimo de queda para alertar
-INTERVALO_MINUTOS = 30    # minutos entre varreduras
-PAGINAS_VARRER    = 3     # páginas por categoria
+INTERVALO_MINUTOS = 20    # minutos entre varreduras
+PAGINAS_VARRER    = 5     # páginas por categoria
 ARQUIVO_HISTORICO = "historico_viniloff.json"
 
 # ─────────────────────────────────────────────
@@ -107,7 +108,7 @@ def headers_aleatorios():
     }
 
 
-def pausa_humana(minimo=8, maximo=18):
+def pausa_humana(minimo=3, maximo=9):
     """Pausa aleatória que imita comportamento humano"""
     pausa = random.uniform(minimo, maximo)
     # Às vezes faz uma pausa mais longa como se estivesse lendo
@@ -358,7 +359,6 @@ def enviar_alertas(alertas_promocao, alertas_queda):
 def varredura_completa():
     log("━" * 50)
     log("🔍 Iniciando varredura...")
-    os.system("python exportar_planilha.py")
 
     historico = carregar_historico()
     todos_produtos = []
@@ -388,6 +388,257 @@ def varredura_completa():
     log("━" * 50 + "\n")
 
 
+def gerar_planilha():
+    """Gera planilha Excel com todos os produtos monitorados"""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+
+        if not os.path.exists(ARQUIVO_HISTORICO):
+            return None
+
+        with open(ARQUIVO_HISTORICO, "r", encoding="utf-8") as f:
+            historico = json.load(f)
+
+        COR_HEADER  = "2C1A0E"
+        COR_TEXTO   = "E8DDD0"
+        COR_ACCENT  = "C8541A"
+        COR_PROMO   = "FFF3EC"
+        COR_FORTE   = "FFE0CC"
+        COR_PAR     = "F5F0EB"
+
+        def borda():
+            s = Side(style="thin", color="DDCCBB")
+            return Border(left=s, right=s, top=s, bottom=s)
+
+        # Ordena por desconto
+        itens = []
+        for asin, d in historico.items():
+            preco_atual  = d.get("preco_atual", 0)
+            preco_maximo = d.get("preco_maximo", preco_atual)
+            preco_minimo = d.get("preco_minimo", preco_atual)
+            desconto     = round(((preco_maximo - preco_atual) / preco_maximo) * 100) if preco_maximo > 0 else 0
+            itens.append({
+                "nome": d.get("nome", ""), "preco_atual": preco_atual,
+                "preco_maximo": preco_maximo, "preco_minimo": preco_minimo,
+                "desconto": desconto, "url": d.get("url", ""),
+            })
+        itens.sort(key=lambda x: x["desconto"], reverse=True)
+
+        wb = Workbook()
+
+        # ── ABA 1: TODOS ──
+        ws = wb.active
+        ws.title = "Todos os Produtos"
+
+        ws.merge_cells("A1:H1")
+        ws["A1"] = "VinilOFF — Produtos Monitorados"
+        ws["A1"].font = Font(name="Arial", bold=True, size=14, color=COR_TEXTO)
+        ws["A1"].fill = PatternFill("solid", fgColor=COR_HEADER)
+        ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.row_dimensions[1].height = 30
+
+        ws.merge_cells("A2:H2")
+        ws["A2"] = f"Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')} · {len(itens)} produtos"
+        ws["A2"].font = Font(name="Arial", size=10, color="7A5C4A")
+        ws["A2"].fill = PatternFill("solid", fgColor="3D2510")
+        ws["A2"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.row_dimensions[2].height = 18
+
+        headers = ["#", "Produto", "Preço Atual", "Preço Máximo", "Preço Mínimo", "Desconto %", "Status", "Link"]
+        for col, h in enumerate(headers, 1):
+            c = ws.cell(row=3, column=col, value=h)
+            c.font = Font(name="Arial", bold=True, size=10, color=COR_TEXTO)
+            c.fill = PatternFill("solid", fgColor=COR_ACCENT)
+            c.alignment = Alignment(horizontal="center", vertical="center")
+            c.border = borda()
+        ws.row_dimensions[3].height = 22
+
+        for i, item in enumerate(itens):
+            row = i + 4
+            cor = COR_FORTE if item["desconto"] >= 20 else COR_PROMO if item["desconto"] >= 10 else COR_PAR if i % 2 == 0 else "FFFFFF"
+            fill = PatternFill("solid", fgColor=cor)
+
+            dados = [
+                (i+1, "center", False, "7A5C4A"),
+                (item["nome"], "left", item["desconto"] >= 10, "000000"),
+                (item["preco_atual"], "center", True, COR_ACCENT if item["desconto"] >= 10 else "000000"),
+                (item["preco_maximo"], "center", False, "999999"),
+                (item["preco_minimo"], "center", False, "1A3A2A"),
+                (f"=(D{row}-C{row})/D{row}", "center", item["desconto"] >= 10, COR_ACCENT if item["desconto"] >= 10 else "666666"),
+                ("🔥 PROMOÇÃO" if item["desconto"] >= 20 else "📉 Em queda" if item["desconto"] >= 10 else "💤 Normal", "center", False, "000000"),
+                (item["url"], "center", False, "1155CC"),
+            ]
+
+            for col, (val, align, bold, color) in enumerate(dados, 1):
+                c = ws.cell(row=row, column=col, value=val)
+                c.font = Font(name="Arial", size=10, bold=bold, color=color)
+                c.fill = fill
+                c.border = borda()
+                c.alignment = Alignment(horizontal=align, vertical="center", wrap_text=(col==2))
+                if col in [3, 4, 5]:
+                    c.number_format = 'R$ #,##0.00'
+                if col == 6:
+                    c.number_format = '0%'
+                if col == 8:
+                    c.hyperlink = val
+                    c.font = Font(name="Arial", size=9, color="1155CC", underline="single")
+            ws.row_dimensions[row].height = 20
+
+        for col, width in zip("ABCDEFGH", [5, 42, 14, 14, 14, 12, 16, 35]):
+            ws.column_dimensions[col].width = width
+        ws.freeze_panes = "A4"
+
+        # ── ABA 2: PROMOÇÕES ──
+        ws2 = wb.create_sheet("🔥 Promoções Ativas")
+        ws2.merge_cells("A1:G1")
+        ws2["A1"] = f"VinilOFF — Promoções Ativas · {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+        ws2["A1"].font = Font(name="Arial", bold=True, size=13, color=COR_TEXTO)
+        ws2["A1"].fill = PatternFill("solid", fgColor=COR_ACCENT)
+        ws2["A1"].alignment = Alignment(horizontal="center", vertical="center")
+        ws2.row_dimensions[1].height = 28
+
+        h2 = ["#", "Produto", "Preço Atual", "Preço Máximo", "Desconto", "Economia", "Link"]
+        for col, h in enumerate(h2, 1):
+            c = ws2.cell(row=2, column=col, value=h)
+            c.font = Font(name="Arial", bold=True, size=10, color=COR_TEXTO)
+            c.fill = PatternFill("solid", fgColor=COR_HEADER)
+            c.alignment = Alignment(horizontal="center", vertical="center")
+            c.border = borda()
+        ws2.row_dimensions[2].height = 22
+
+        promos = [x for x in itens if x["desconto"] >= 10]
+        for i, item in enumerate(promos):
+            row = i + 3
+            fill = PatternFill("solid", fgColor=COR_FORTE if item["desconto"] >= 20 else COR_PROMO)
+            vals = [i+1, item["nome"], item["preco_atual"], item["preco_maximo"],
+                    f"=(D{row}-C{row})/D{row}", f"=D{row}-C{row}", item["url"]]
+            for col, val in enumerate(vals, 1):
+                c = ws2.cell(row=row, column=col, value=val)
+                c.fill = fill
+                c.border = borda()
+                c.alignment = Alignment(horizontal="center" if col != 2 else "left", vertical="center", wrap_text=(col==2))
+                bold = col in [2, 3, 5, 6]
+                color = COR_ACCENT if col in [3, 5] else "1A3A2A" if col == 6 else "1155CC" if col == 7 else "000000"
+                c.font = Font(name="Arial", size=10, bold=bold, color=color)
+                if col in [3, 4, 6]:
+                    c.number_format = 'R$ #,##0.00'
+                if col == 5:
+                    c.number_format = '0%'
+                if col == 7:
+                    c.hyperlink = val
+                    c.font = Font(name="Arial", size=9, color="1155CC", underline="single")
+            ws2.row_dimensions[row].height = 20
+
+        for col, width in zip("ABCDEFG", [5, 42, 14, 14, 12, 14, 35]):
+            ws2.column_dimensions[col].width = width
+        ws2.freeze_panes = "A3"
+
+        caminho = "viniloff_produtos.xlsx"
+        wb.save(caminho)
+        log(f"📊 Planilha gerada: {len(itens)} produtos, {len(promos)} em promoção")
+        return caminho
+
+    except Exception as e:
+        log(f"Erro ao gerar planilha: {e}")
+        return None
+
+
+def enviar_documento_telegram(caminho_arquivo, caption=""):
+    """Envia arquivo para o Telegram"""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument"
+        with open(caminho_arquivo, "rb") as f:
+            r = requests.post(url, data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "caption": caption,
+                "parse_mode": "HTML",
+            }, files={"document": f}, timeout=30)
+        return r.status_code == 200
+    except Exception as e:
+        log(f"Erro ao enviar documento: {e}")
+        return False
+
+
+def verificar_comandos():
+    """Fica escutando comandos do Telegram em segundo plano"""
+    ultimo_update = 0
+    log("📱 Escutando comandos do Telegram...")
+
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+            r = requests.get(url, params={"offset": ultimo_update + 1, "timeout": 30}, timeout=35)
+
+            if r.status_code != 200:
+                time.sleep(10)
+                continue
+
+            data = r.json()
+            for update in data.get("result", []):
+                ultimo_update = update["update_id"]
+                msg = update.get("message", {})
+                texto = msg.get("text", "").strip().lower()
+                chat_id = str(msg.get("chat", {}).get("id", ""))
+
+                # Só responde ao dono do bot
+                if chat_id != str(TELEGRAM_CHAT_ID):
+                    continue
+
+                if texto == "/planilha":
+                    log("📊 Comando /planilha recebido!")
+                    enviar_telegram("⏳ Gerando planilha, aguarde...")
+                    caminho = gerar_planilha()
+                    if caminho and os.path.exists(caminho):
+                        historico = carregar_historico()
+                        total = len(historico)
+                        promos = len([x for x in historico.values()
+                                      if x.get("preco_maximo", 0) > 0 and
+                                      round(((x.get("preco_maximo", 0) - x.get("preco_atual", 0)) / x.get("preco_maximo", 1)) * 100) >= 10])
+                        caption = (
+                            f"📊 <b>VinilOFF — Planilha atualizada</b>\n\n"
+                            f"📀 {total} produtos monitorados\n"
+                            f"🔥 {promos} em promoção\n"
+                            f"<i>{datetime.now().strftime('%d/%m/%Y %H:%M')}</i>"
+                        )
+                        if enviar_documento_telegram(caminho, caption):
+                            log("✅ Planilha enviada no Telegram!")
+                        else:
+                            enviar_telegram("❌ Erro ao enviar planilha.")
+                    else:
+                        enviar_telegram("❌ Nenhum dado ainda. Aguarde a primeira varredura.")
+
+                elif texto == "/status":
+                    historico = carregar_historico()
+                    total = len(historico)
+                    promos = len([x for x in historico.values()
+                                  if x.get("preco_maximo", 0) > 0 and
+                                  round(((x.get("preco_maximo", 0) - x.get("preco_atual", 0)) / x.get("preco_maximo", 1)) * 100) >= 10])
+                    enviar_telegram(
+                        f"📊 <b>Status do VinilOFF Bot</b>\n\n"
+                        f"✅ Online e funcionando\n"
+                        f"📀 {total} produtos monitorados\n"
+                        f"🔥 {promos} em promoção agora\n"
+                        f"⏱️ Varredura a cada {INTERVALO_MINUTOS} min\n"
+                        f"🎯 Alerta com desconto ≥ {DESCONTO_MINIMO}%\n\n"
+                        f"<i>{datetime.now().strftime('%d/%m/%Y %H:%M')}</i>"
+                    )
+
+                elif texto == "/ajuda":
+                    enviar_telegram(
+                        f"🤖 <b>Comandos do VinilOFF Bot</b>\n\n"
+                        f"/planilha — Baixar planilha Excel com todos os produtos\n"
+                        f"/status — Ver quantos produtos estão em promoção\n"
+                        f"/ajuda — Ver esta mensagem\n\n"
+                        f"<i>Alertas automáticos chegam quando um vinil entra em promoção!</i>"
+                    )
+
+        except Exception as e:
+            log(f"Erro no listener: {e}")
+            time.sleep(15)
+
+
 def main():
     log("🎵 VinilOFF Bot iniciado!")
     log(f"⏱️  Intervalo: {INTERVALO_MINUTOS} min | 🎯 Desconto mínimo: {DESCONTO_MINIMO}%")
@@ -398,8 +649,17 @@ def main():
         f"🔍 {len(CATEGORIAS)} categorias · {PAGINAS_VARRER} páginas cada\n"
         f"🎯 Alerta com desconto ≥ <b>{DESCONTO_MINIMO}%</b>\n"
         f"⏱️  A cada <b>{INTERVALO_MINUTOS} minutos</b>\n\n"
+        f"Comandos disponíveis:\n"
+        f"/planilha — baixar planilha Excel\n"
+        f"/status — ver resumo\n"
+        f"/ajuda — ver todos os comandos\n\n"
         f"Monitoramento ativo! 🔥"
     )
+
+    # Inicia listener de comandos em segundo plano
+    thread = threading.Thread(target=verificar_comandos, daemon=True)
+    thread.start()
+    log("📱 Listener de comandos iniciado!")
 
     while True:
         try:
