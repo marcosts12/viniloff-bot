@@ -30,7 +30,7 @@ TELEGRAM_TOKEN    = "8944782842:AAHMfyHMKSijzbby1lc-hNplMMGPu7BnP4s"
 TELEGRAM_CHAT_ID  = 7484525336
 
 DESCONTO_MINIMO   = 10    # % mínimo de queda para alertar
-INTERVALO_MINUTOS = 20    # minutos entre varreduras
+INTERVALO_MINUTOS = 30    # minutos entre varreduras
 PAGINAS_VARRER    = 3     # páginas por categoria
 ARQUIVO_HISTORICO = "historico_viniloff.json"
 
